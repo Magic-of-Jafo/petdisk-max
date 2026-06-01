@@ -537,7 +537,7 @@ static bool filenameMatches(const char* candidate, const char* pattern)
            (star != nullptr || strlen(candidate) == cmpLen);
 }
 
-bool SDFAT::findFile(char* fileName)
+bool SDFAT::findFile(char* fileName, char* actualFilename)
 {
     if (!remountIfNeeded()) return false;
 
@@ -559,6 +559,9 @@ bool SDFAT::findFile(char* fileName)
         if (filenameMatches(entry->d_name, fileName))
         {
             found = true;
+            if (actualFilename) {
+                strcpy(actualFilename, entry->d_name);
+            }
             break;
         }
     }
@@ -596,7 +599,18 @@ bool SDFAT::openFileForReading(uint8_t* fileName)
     }
 
     char path[256];
-    buildPath((const char*)fileName, path, sizeof(path));
+    if (strstr((char*)fileName, "*")) {
+        char fname[64];
+        if (findFile((char*)fileName, fname)) {
+            buildPath(fname, path, sizeof(path));
+        } else {
+            // cannot find wildcard
+            ESP_LOGE(TAG, "wildcard find %s failed", fileName);
+            return false;
+        }
+    } else {
+        buildPath((const char*)fileName, path, sizeof(path));
+    }
 
     _readFile = fopen(path, "rb");
     if (!_readFile)

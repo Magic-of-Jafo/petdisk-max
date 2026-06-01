@@ -92,7 +92,7 @@ public:
     // Searches the current directory for fileName (case-insensitive, supports
     // '*' wildcard suffix).  Returns true if the file exists; no other state
     // is modified.
-    bool findFile(char* fileName);
+    bool findFile(char* fileName, char* actualFilename = NULL);
 
     // Deletes fileName from the current directory.  Returns true on success.
     bool deleteFile(char* fileName);
