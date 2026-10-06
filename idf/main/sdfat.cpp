@@ -399,6 +399,18 @@ bool SDFAT::openDirectory(const char* dirName)
         // Root of the mounted volume
         strncpy(_currentDir, SDFAT_MOUNT_POINT, sizeof(_currentDir) - 1);
     }
+    else if (strcmp(dirName, "..") == 0)
+    {
+        // FatFs is built without relative paths (FF_FS_RPATH 0), so ".."
+        // can't be passed down in a path. Go up one level ourselves,
+        // never above the mount point.
+        size_t rootLen = strlen(SDFAT_MOUNT_POINT);
+        char* slash = strrchr(_currentDir, '/');
+        if (slash != nullptr && (size_t)(slash - _currentDir) >= rootLen)
+        {
+            *slash = '\0';
+        }
+    }
     else
     {
         // Relative to current directory
