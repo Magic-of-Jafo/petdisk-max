@@ -21,6 +21,12 @@ on the PET keyboard, an agent writes and tests a BASIC program in an
 emulator, saves it to the network drive, and you `LOAD` and `RUN` it on the
 real machine.
 
+A companion **PET MCP server** (section 10) gives any AI client that speaks
+the Model Context Protocol a PET to work with: a persistent emulated PET it
+can type into, read, debug and screenshot, the build tools, a verified
+reference for the machine, and, once the hardware parts exist, a way to put
+programs on the real PET's network drive and talk to its user.
+
 ## 2. Background
 
 - The PET (1977) has no networking. Its IEEE-488 port talks to disk drives
@@ -106,6 +112,9 @@ Three parts, each usable and testable on its own:
    anyone can write their own.
 3. **PET software**: a ready-to-run chat program (`AICHAT`) and a subroutine
    library for other programs.
+4. **PET MCP server**: the developer side. It lets an AI build and test PET
+   programs in an emulator and, later, publish them to the real PET and
+   exchange messages with it (section 10).
 
 ## 7. Requirements — firmware
 
@@ -238,7 +247,78 @@ Bodies from the PETdisk are raw PETSCII, base64-encoded like network saves.
 - **PS-4.** Tested in VICE (`xpet`) with folder-backed drives before
   release, and on hardware.
 
-## 10. Security and privacy
+## 10. Requirements — PET MCP server
+
+An MCP server that gives AI clients (Claude Code, Claude Desktop and any
+other MCP client) a Commodore PET to develop for. It ships as a Docker
+image with VICE, the build tools and the reference, so a PET owner can run
+it on a PC, a Raspberry Pi or a NAS.
+
+### 10.1 Emulator
+
+- **MCP-1.** A **persistent** emulated PET per session: it keeps running
+  between tool calls, so an AI can set a breakpoint, inspect memory, change
+  it, and continue, like a person at a debugger. Idle sessions shut down
+  after a configurable time.
+- **MCP-2.** Machine profiles: PET 4032 (BASIC 4, 40 columns, 60 Hz) by
+  default; 2001, 4016, 8032 and 50 Hz variants selectable.
+- **MCP-3.** Tools:
+
+  | Tool | Does |
+  |---|---|
+  | `pet_reset` | Power-cycle the PET (optionally another model) and wait for `READY.` |
+  | `pet_load` | Load BASIC source text, a PRG file, or PRG bytes; `RUN` it or not |
+  | `pet_type` | Type keys, with names for special keys (RETURN, CLR, cursor, STOP) |
+  | `pet_wait` | Let the PET run for a time |
+  | `pet_wait_for` | Run until text appears on screen, or a timeout |
+  | `pet_screen` | The screen as text, and optionally as an image |
+  | `pet_peek` / `pet_poke` | Read or write memory |
+  | `pet_registers` | CPU registers |
+  | `pet_break` / `pet_continue` / `pet_step` | Breakpoints and stepping |
+  | `pet_disassemble` | Disassemble memory |
+  | `pet_attach_drive` | Make a workspace folder a disk drive (8–11) |
+
+- **MCP-4.** Every result says whether a BASIC error is on screen, and
+  every call has a time limit, so a runaway program can't hang the client.
+
+### 10.2 Build tools
+
+- **MCP-5.** Tokenize BASIC (petcat, with the PET's letter case handled)
+  and list a PRG back to text.
+- **MCP-6.** Assemble with ACME and compile C with cc65, returning errors
+  with file and line numbers.
+
+### 10.3 Reference
+
+- **MCP-7.** The verified machine reference (BASIC 4 keywords and syntax,
+  memory map, KERNAL, screen codes, hardware, machine language, disk use)
+  as MCP resources, plus a search tool. Every fact says whether it was
+  checked against the ROM, checked in the emulator, or taken from
+  documentation.
+- **MCP-8.** ROM disassemblies with addresses, so a client can check what
+  a ROM routine really does.
+
+### 10.4 Real PET (later milestones)
+
+- **MCP-9.** `petdisk_publish`: put a finished PRG in the PETdisk network
+  drive's folder, ready for `LOAD"NAME",9` on the real PET.
+- **MCP-10.** `petdisk_inbox` / `petdisk_reply`: messages typed on the PET
+  arrive as tool results and replies go back to the PET screen, through
+  mailbox mode (8.1) or the agent channel (section 7).
+- **Not possible:** seeing or controlling a real PET's screen. A real PET
+  only talks to the outside when a PET program asks.
+
+### 10.5 Safety and packaging
+
+- **MCP-11.** File tools are confined to a workspace folder. No general
+  shell access through the MCP server.
+- **MCP-12.** Transports: stdio (for a client in the same container) and
+  HTTP for clients elsewhere on the home network, with a token and the
+  same LAN-only guidance as the bridge.
+- **MCP-13.** The image uses VICE's own ROM files and builds on any x86-64
+  or ARM64 Docker host.
+
+## 11. Security and privacy
 
 - **SEC-1.** The bridge listens on the home network only by default. The
   docs warn against port forwarding or exposing it to the internet.
@@ -254,7 +334,7 @@ Bodies from the PETdisk are raw PETSCII, base64-encoded like network saves.
 - **SEC-7.** The token travels in plain HTTP. This is acceptable on a home
   network and documented as such.
 
-## 11. Non-functional requirements
+## 12. Non-functional requirements
 
 | Area | Requirement |
 |---|---|
@@ -265,7 +345,7 @@ Bodies from the PETdisk are raw PETSCII, base64-encoded like network saves.
 | Compatibility | Old firmware + new bridge: mailbox mode works. New firmware + no bridge: everything else unchanged |
 | Documentation | Setup guide for each back end, a protocol reference, and the BASIC library reference |
 
-## 12. Milestones
+## 13. Milestones
 
 | | Milestone | Needs hardware? | Done when |
 |---|---|---|---|
@@ -275,8 +355,13 @@ Bodies from the PETdisk are raw PETSCII, base64-encoded like network saves.
 | **M3** | BASIC subroutine library and an example game | No (VICE), then yes | Example game plays on hardware |
 | **M4** | Vibe-coding setup: Claude Code + VICE in Docker as a `command` back end | No | A request typed on the PET produces a tested program on the network drive |
 | **M5** | Community release: docs, prebuilt firmware, offer changes upstream to bitfixer | — | Tagged release on the fork; pull request opened upstream |
+| **MC1** | PET MCP server: emulator, build tools and reference (MCP-1 to MCP-8, MCP-11, MCP-12 stdio) | No | Claude Code builds and debugs a BASIC + machine code program using only MCP tools |
+| **MC2** | MCP over HTTP; `petdisk_publish`; mailbox tools (MCP-9, MCP-10 with M1) | Yes, for the last step | A program published from an MCP client loads on the real PET; a PET message arrives as a tool result |
+| **MC3** | Agent-channel tools (MCP-10 with M2) | Yes | Same as MC2 using the firmware agent channel |
 
-## 13. Success measures
+MC1 needs no hardware and can be built in parallel with M0.
+
+## 14. Success measures
 
 - A new user goes from a working PETdisk to chatting from the PET in under
   30 minutes with the setup guide.
@@ -286,7 +371,7 @@ Bodies from the PETdisk are raw PETSCII, base64-encoded like network saves.
 - The firmware changes are accepted upstream, or the fork is the version
   the community points people to.
 
-## 14. Risks
+## 15. Risks
 
 | Risk | Mitigation |
 |---|---|
@@ -298,7 +383,7 @@ Bodies from the PETdisk are raw PETSCII, base64-encoded like network saves.
 | Someone exposes the bridge to the internet | Token, LAN-only default, clear warnings |
 | Upstream is unresponsive | Work stays on a public fork under the same license; small, separate commits make it easy to merge later |
 
-## 15. Open questions
+## 16. Open questions
 
 1. **Device number and name.** Is `AGENT` the right config keyword, or a
    more general `TEXT` / `HTTP` channel (useful for BBS-style chat and
