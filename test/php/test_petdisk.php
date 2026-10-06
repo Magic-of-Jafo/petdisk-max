@@ -45,6 +45,11 @@ function req($method, $query, $body = '')
 function get($query) { $r = req('GET', $query); return $r[1]; }
 function put($query, $data) { return req('PUT', $query.'&b64=1', base64_encode($data)); }
 
+// wait for the server to come up
+for ($i = 0; $i < 100 && req('GET', '?file=TIME&l=1')[0] != 200; $i++) {
+    usleep(100000);
+}
+
 // --- fixture -----------------------------------------------------------------
 @mkdir("$root/GAMES");
 @mkdir("$root/games2");
@@ -70,6 +75,8 @@ check('listing outside root refused', get('?d=1&p=0&dir=..') === "\n");
 check('listing hidden folder refused', get('?d=1&p=0&dir=.hidden') === "\n");
 check('listing through symlink outside refused', get('?d=1&p=0&dir=escape') === "\n");
 check('listing missing folder is empty', get('?d=1&p=0&dir=NOPE') === "\n");
+check('listing missing folder is 404', req('GET', '?d=1&p=0&dir=NOPE')[0] === 404);
+check('listing existing folder is 200', req('GET', '?d=1&p=0&dir=GAMES')[0] === 200);
 
 // --- sizes and reads -----------------------------------------------------------
 check('size', get('?file=A.PRG&l=1') === "7\r\n");

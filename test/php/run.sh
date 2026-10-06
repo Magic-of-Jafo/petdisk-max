@@ -13,7 +13,6 @@ for v in $versions; do
         mkdir -p /srv/root
         cp /repo/www/petdisk.php /srv/root/
         php -S 127.0.0.1:8080 -t /srv/root >/tmp/server.log 2>&1 &
-        sleep 1
         php /repo/test/php/test_petdisk.php http://127.0.0.1:8080/petdisk.php /srv/root
     ' || status=1
 done

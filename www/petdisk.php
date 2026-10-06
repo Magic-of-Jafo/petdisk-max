@@ -274,6 +274,12 @@ if ($verb == "GET")
     if (getParam('d') == 1 && $fileParam === false)
     {
         $dir = resolveDir(getParam('dir'));
+        if ($dir === false)
+        {
+            // missing folder: 404 lets newer firmware refuse to change into it;
+            // the body is still an empty listing for older firmware
+            http_response_code(404);
+        }
         respond(directoryListing($dir, intParam('p'), getParam('sub') == 1));
     }
     else if ($fileParam === "TIME")
