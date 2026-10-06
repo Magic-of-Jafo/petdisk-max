@@ -142,14 +142,8 @@ bool EspConn::wifi_stop() {
     return true;
 }
 
-static bool dnsFound = false;
-static ip_addr_t ipAddr;
-
-static void dns_found_cb(const char *name, const ip_addr_t* ipaddr, void* callback_arg)
-{
-    ipAddr = *ipaddr;
-    dnsFound = true;
-}
+// Socket send/receive timeout, so a stalled server can't hang the PETdisk.
+#define HTTP_TIMEOUT_MS 5000
 
 // check if a string is an ip address already
 static bool isIP(const char* host) {
@@ -164,23 +158,35 @@ static bool isIP(const char* host) {
 
 bool EspConn::startClient(const char* host, uint16_t port)
 {
-    // TODO: check if connection is actually made
     _port = port;
     if (isIP(host)) {
-        strcpy(_host, host);
-    } else {
-        dns_gethostbyname(host, &ipAddr, dns_found_cb, NULL);
-
-        while (!dnsFound) {
-            hDelayMs(100);
-        }
-
-        sprintf(_host, "%i.%i.%i.%i", 
-            ip4_addr1(&ipAddr.u_addr.ip4), 
-            ip4_addr2(&ipAddr.u_addr.ip4), 
-            ip4_addr3(&ipAddr.u_addr.ip4), 
-            ip4_addr4(&ipAddr.u_addr.ip4));
+        strncpy(_host, host, sizeof(_host) - 1);
+        _host[sizeof(_host) - 1] = 0;
+        return true;
     }
+
+    // Resolve the name for every request. The previous dns_gethostbyname()
+    // code waited on a flag that was never reset, so after the first lookup
+    // every other host name silently reused the first host's address.
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    struct addrinfo* res = NULL;
+
+    enable_interrupts();
+    int err = getaddrinfo(host, NULL, &hints, &res);
+    disable_interrupts();
+
+    if (err != 0 || res == NULL) {
+        ESP_LOGE("conn", "dns lookup failed for %s (%d)", host, err);
+        _host[0] = 0;
+        return false;
+    }
+
+    struct sockaddr_in* addr = (struct sockaddr_in*)res->ai_addr;
+    inet_ntoa_r(addr->sin_addr, _host, sizeof(_host));
+    freeaddrinfo(res);
     return true;
 }
 
@@ -190,73 +196,112 @@ typedef struct _httpArgs {
     uint8_t* sendData;
     int dataLen;
     uint8_t* recvData;
+    int recvCapacity;
     int recCount;
+    bool truncated;
 } httpArgs;
 
-static void http_fetch(void* args) {
-    httpArgs* hargs = (httpArgs*)args;
-    int addr_family = 0;
-    int ip_protocol = 0;
+// Send a request and read the whole response (HTTP/1.0: the server closes
+// the connection when it is done). Returns false on any failure.
+static bool http_fetch(httpArgs* hargs) {
+    hargs->recCount = 0;
+    hargs->truncated = false;
 
     struct sockaddr_in dest_addr;
-    inet_pton(AF_INET, hargs->host, &dest_addr.sin_addr);
+    memset(&dest_addr, 0, sizeof(dest_addr));
+    if (inet_pton(AF_INET, hargs->host, &dest_addr.sin_addr) != 1) {
+        return false;
+    }
     dest_addr.sin_family = AF_INET;
     dest_addr.sin_port = htons(hargs->port);
-    addr_family = AF_INET;
-    ip_protocol = IPPROTO_IP;
 
-    int sock = socket(addr_family, SOCK_STREAM, ip_protocol);
+    int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
     if (sock < 0) {
-        return;
-    }
-    int err = connect(sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
-    if (err != 0) {
-        return;
-    }
-    err = send(sock, hargs->sendData, hargs->dataLen, 0);
-    if (err < 0) {
-        return;
+        return false;
     }
 
-    // keep receiving
-    uint8_t* recvbuf = hargs->recvData;
-    while (1) {
-        int len = recv(sock, recvbuf, 1000, 0);
-        // Error occurred during receiving
-        if (len < 0) {
-            break;
-        } else {
-            hargs->recCount += len;
-            recvbuf += len;
+    struct timeval timeout;
+    timeout.tv_sec = HTTP_TIMEOUT_MS / 1000;
+    timeout.tv_usec = (HTTP_TIMEOUT_MS % 1000) * 1000;
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+
+    bool ok = false;
+    if (connect(sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr)) == 0) {
+        // send() may accept only part of the request
+        int sent = 0;
+        while (sent < hargs->dataLen) {
+            int n = send(sock, hargs->sendData + sent, hargs->dataLen - sent, 0);
+            if (n <= 0) {
+                break;
+            }
+            sent += n;
+        }
+
+        if (sent == hargs->dataLen) {
+            // Read until the server closes the connection, never past the
+            // end of the receive buffer. Excess data is drained and dropped.
+            ok = true;
+            while (1) {
+                int space = hargs->recvCapacity - hargs->recCount;
+                uint8_t discard[64];
+                uint8_t* dest = space > 0 ? hargs->recvData + hargs->recCount : discard;
+                int len = recv(sock, dest, space > 0 ? space : sizeof(discard), 0);
+                if (len == 0) {
+                    break;          // server closed the connection: done
+                }
+                if (len < 0) {
+                    ok = false;     // timeout or error
+                    break;
+                }
+                if (space > 0) {
+                    hargs->recCount += len;
+                } else {
+                    hargs->truncated = true;
+                }
+            }
         }
     }
 
-    if (sock != -1) {
-        shutdown(sock, 0);
-        close(sock);
+    // Always release the socket; failed requests used to leak it.
+    shutdown(sock, 0);
+    close(sock);
+
+    if (hargs->truncated) {
+        ESP_LOGE("conn", "response larger than %d bytes, dropped", hargs->recvCapacity);
+        ok = false;
     }
+    return ok;
 }
- 
-void EspConn::sendData(uint8_t sock, unsigned char* data, int len)
+
+bool EspConn::sendData(uint8_t sock, unsigned char* data, int len)
 {
     httpArgs args;
     args.host = _host;
     args.port = _port;
     args.sendData = data;
     args.dataLen = len;
-    args.recvData = _serialBuffer;
-    args.recCount = 0;
-    char logstr[256];
+    args.recvData = _receiveBuffer;
+    args.recvCapacity = RECEIVE_BUFFER_SIZE;
 
     enable_interrupts();
-    memcpy(logstr, data, len);
-    logstr[len] = 0;
-    http_fetch(&args);
-    ESP_LOGI("conn", "fetch: %s", logstr);
+    bool ok = http_fetch(&args);
+    // log only the request line; requests can be much longer than a log line
+    const char* eol = (const char*)memchr(data, '\r', len);
+    int lineLen = eol ? (int)(eol - (const char*)data) : len;
+    if (lineLen > 120) {
+        lineLen = 120;
+    }
+    ESP_LOGI("conn", "fetch: %.*s -> %s, %d bytes", lineLen, (const char*)data, ok ? "ok" : "FAILED", args.recCount);
     portYIELD();
     disable_interrupts();
-    
-    *_serialBufferSize = args.recCount;
+
+    _receivedBytes = ok ? args.recCount : 0;
+    _receiveBuffer[_receivedBytes] = 0;
+    if (_serialBufferSize) {
+        *_serialBufferSize = _receivedBytes;
+    }
+    return ok;
 }
 
 }
